@@ -5,9 +5,7 @@ import csv
 import logging
 from bs4 import BeautifulSoup
 from transformers import pipeline
-from langchain.prompts import PromptTemplate
-from langchain_groq import ChatGroq
-from langchain_core.runnables import RunnableSequence
+from groq import Groq
 from dotenv import load_dotenv
 
 # Configure logging
@@ -25,24 +23,15 @@ class StockNewsSummarizer:
         self.summaries = {}
         self.sentiment_analyzer = pipeline('sentiment-analysis', model='nlptown/bert-base-multilingual-uncased-sentiment')
         self.output_file = 'assetsummaries.csv'
-
-        # Define the prompt template for summarization
-        template = """You are a summarization assistant. Your task is to summarize the provided text in a concise and coherent manner. Please summarize the following text:
-        =========
-        {input}
-        =========
-        Summary:"""
-        
-        # Create a PromptTemplate object with the defined template
-        self.prompt = PromptTemplate(template=template, input_variables=["input"])
-        
-        # Initialize the language model with specific parameters
         groq_api_key = os.getenv("GROQ_API_KEY")
-        self.llm = ChatGroq(api_key=groq_api_key, model_name="llama3-8b-8192")
+        self.groqclient = Groq(api_key=groq_api_key)
         
-        # Create the summarization sequence
-        self.summarization_chain = RunnableSequence(self.prompt | self.llm)
-    
+        # Initialize CSV file with headers if it doesn't exist
+        if not os.path.exists(self.output_file):
+            with open(self.output_file, mode='w', newline='', encoding='utf-8') as f:
+                csv_writer = csv.writer(f)
+                csv_writer.writerow(['Ticker', 'Summary', 'Label', 'Confidence', 'URL'])
+            
     def search_for_stock_news_urls(self, ticker):
         try:
             search_url = f"https://www.google.com/search?q=yahoo+finance+{ticker}&tbm=nws"
@@ -82,14 +71,39 @@ class StockNewsSummarizer:
     
     def summarize_articles(self, articles):
         summaries = []
-        for article in articles:
-            try:
-                response = self.summarization_chain.invoke({"input": article})
-                summary = response.get('output', '')  # Safely get the 'output' key
+        try:
+            for article in articles:
+                completion = self.groqclient.chat.completions.create(
+                    model="llama3-8b-8192",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": "You are helpful fintech assistant"
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Summarize the following news article accurately and impartially. Ensure the summary is devoid of any bias or personal comments:\n{article}. Avoid introductory phrases such as 'here is your summary...'"
+                        }
+                    ],
+                    temperature=0,
+                    max_tokens=1024,
+                    top_p=1,
+                    stream=True,
+                    stop=None,
+                )
+                
+                summary = ""
+                for chunk in completion:
+                    summary += chunk.choices[0].delta.content or ""
+                
+                # Process the summary text        
+                summary = summary.replace('\n\n', ' ')
+                
                 summaries.append(summary)
-            except Exception as e:
-                logger.error(f"Error summarizing article: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error summarizing article: {str(e)}")
         return summaries
+
     
     def analyze_sentiment(self, summaries):
         return self.sentiment_analyzer(summaries)
@@ -164,7 +178,7 @@ class StockNewsSummarizer:
 
 # Example Usage:
 if __name__ == "__main__":
-    monitored_tickers = ['OKLO','AAPL','NVDA']  # List of tickers to monitor
+    monitored_tickers = ['OKLO','AAPL','NVDIA']  # List of tickers to monitor
     summarizer = StockNewsSummarizer(monitored_tickers)
     final_output = summarizer.run_analysis()
     print(final_output)
